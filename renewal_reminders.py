@@ -1,12 +1,12 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 import logging
-import os
 import smtplib
-from email.message import EmailMessage
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from email.utils import make_msgid
+import os
+from connect import connect
 
 # Configure logging
 logging.basicConfig(
@@ -19,90 +19,121 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-def send_renewal_email(to_address, company_name, days_out):
-    msg = EmailMessage()
-    msg['Subject'] = f"Subscription Renewal in {days_out} Days"
-    msg['From'] = os.getenv('MAIL_DEFAULT_SENDER')
-    msg['To'] = to_address
-
-    msg.set_content(f"""
-    Hello {company_name},
-
-    This is a reminder that your subscription is set to renew in {days_out} days.
-
-    If you have any questions or need to make changes to your plan, please contact support.
-
-    — The Ribbon Team
-    """)
-
-    try:
-        with smtplib.SMTP_SSL('smtp.office365.com', 465) as smtp:
-            smtp.login(os.getenv('MAIL_USERNAME'), os.getenv('MAIL_PASSWORD'))
-            smtp.send_message(msg)
-        logger.info(f"Email sent to {to_address} for {company_name} ({days_out} days out).")
-    except Exception as e:
-        logger.error(f"Failed to send email to {to_address}: {e}")
+SMTP_SERVER = 'smtp.office365.com'
+SMTP_PORT = 587
+SMTP_USER = os.getenv('MAIL_USERNAME')
+SMTP_PASS = os.getenv('MAIL_PASSWORD')
+DEFAULT_SENDER = os.getenv('MAIL_DEFAULT_SENDER')
+LOGO_PATH = 'logo.jpg'  # Path to the Ribbon Demographics logo
 
 
 def get_subscriptions_to_notify():
-    from connect import connect
-
-    today = datetime.utcnow().date()
-    renewal_offsets = [30, 60, 3]  # Days before renewal to notify
+    today = datetime.now(UTC).date()
+    renewal_offsets = [30, 60, 3]
     dates = {offset: today + timedelta(days=offset) for offset in renewal_offsets}
-
+    logging.info(dates)
     conn = connect()
     cursor = conn.cursor()
 
-    results = []
+    notifications = {}
 
     try:
-        # Annual notifications (60, 30 days out)
         for offset in [60, 30]:
             cursor.execute("""
                 SELECT s.id AS sub_id, c.company_name, c.id AS company_id, s.renewal_date,
-                       p.billing_cycle, u.email
+                       p.billing_cycle, u.email, u.fname, u.lname, rt.report_name
                 FROM subscriptions_draft s
                 JOIN company c ON s.company_id = c.id
                 JOIN subscription_pricing p ON s.pricing_id = p.id
                 JOIN users u ON u.company_id = c.id AND u.super_user_id IS NULL AND u.is_admin = 1
+                JOIN report_types rt ON p.report_type_id = rt.id
                 WHERE LOWER(p.billing_cycle) = 'annual'
                 AND s.renewal_date = %s
             """, (dates[offset],))
             for row in cursor.fetchall():
-                results.append((row, offset))
+                key = (row['email'], offset, row['fname'], row['lname'])
+                notifications.setdefault(key, []).append(row)
 
-        # Monthly notifications (3 days out, price > 0)
         cursor.execute("""
             SELECT s.id AS sub_id, c.company_name, c.id AS company_id, s.renewal_date,
-                   p.billing_cycle, p.national_price, u.email
+                   p.billing_cycle, p.national_price, u.email, u.fname, u.lname, rt.report_name
             FROM subscriptions_draft s
             JOIN company c ON s.company_id = c.id
             JOIN subscription_pricing p ON s.pricing_id = p.id
             JOIN users u ON u.company_id = c.id AND u.super_user_id IS NULL AND u.is_admin = 1
+            JOIN report_types rt ON p.report_type_id = rt.id
             WHERE LOWER(p.billing_cycle) = 'monthly'
             AND s.renewal_date = %s
             AND p.national_price > 0
         """, (dates[3],))
         for row in cursor.fetchall():
-            results.append((row, 3))
+            key = (row['email'], 3, row['fname'], row['lname'])
+            notifications.setdefault(key, []).append(row)
 
     finally:
         cursor.close()
         conn.close()
 
-    return results
+    return notifications
+
+
+def send_renewal_email(email, days_out, subscriptions, fname, lname):
+    msg = MIMEMultipart('related')
+    msg['Subject'] = f"Upcoming Subscription Renewal in {days_out} Days"
+    msg['From'] = DEFAULT_SENDER
+    msg['To'] = email
+
+    logo_cid = make_msgid(domain='ribbondemographics.com')[1:-1]  # strip <>
+
+    html = f"""
+    <html>
+      <body>
+        <div style='text-align: center;'>
+          <img src="cid:{logo_cid}" alt="Ribbon Demographics Logo" width="150"><br><br>
+        </div>
+        <p>Hi {fname} {lname},</p>
+        <p>This is a friendly reminder that the following Ribbon DAS subscription(s) are set to renew in 
+        <strong>{days_out} days</strong>:</p>
+        <ul>
+    """
+
+    for sub in subscriptions:
+        html += f"<li>{sub['company_name']} — {sub['report_name']} (Renewal Date: {sub['renewal_date']})</li>"
+
+    html += """
+        </ul>
+        <p>If you have any questions, feel free to reach out to our support team. You can also manage your subscriptions
+        by logging into your DAS account and going to Account Settings > Manage Subscriptions.</p>
+        <p>– Ribbon Demographics</p>
+      </body>
+    </html>
+    """
+
+    msg.attach(MIMEText(html, 'html'))
+
+    try:
+        with open(LOGO_PATH, 'rb') as img:
+            logo = MIMEImage(img.read())
+            logo.add_header('Content-ID', f'<{logo_cid}>')
+            msg.attach(logo)
+    except Exception as e:
+        logger.warning(f"Logo not attached: {e}")
+
+    try:
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+            logger.info(f"Email sent to {email} for {days_out}-day renewal notice.")
+    except Exception as e:
+        logger.error(f"Failed to send email to {email}: {e}")
 
 
 def main():
     notifications = get_subscriptions_to_notify()
-    for row, days_out in notifications:
-        email = row.get('email')
-        if email:
-            send_renewal_email(email, row['company_name'], days_out)
-        else:
-            logger.warning(f"No email found for company '{row['company_name']}', skipping email.")
+    logging.info(notifications)
+    for (email, days_out, fname, lname), subs in notifications.items():
+        send_renewal_email(email, days_out, subs, fname, lname)
 
 
 if __name__ == '__main__':
