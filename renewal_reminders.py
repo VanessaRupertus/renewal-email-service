@@ -9,11 +9,12 @@ import os
 from connect import connect
 
 # Configure logging
+LOG_FILE = r"C:\path\to\renewal-email-service\renewal_email_notifier.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("renewal_email_notifier.log"),
+        logging.FileHandler(LOG_FILE),
         logging.StreamHandler()
     ]
 )
@@ -24,7 +25,7 @@ SMTP_PORT = 587
 SMTP_USER = os.getenv('MAIL_USERNAME')
 SMTP_PASS = os.getenv('MAIL_PASSWORD')
 DEFAULT_SENDER = os.getenv('MAIL_DEFAULT_SENDER')
-LOGO_PATH = 'logo.jpg'  # Path to the Ribbon Demographics logo
+LOGO_PATH = r'C:\path\to\renewal-email-service\logo.jpg'  # Path to the Ribbon Demographics logo
 
 
 def get_subscriptions_to_notify():
