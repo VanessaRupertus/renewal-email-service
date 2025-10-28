@@ -28,6 +28,27 @@ DEFAULT_SENDER = os.getenv('MAIL_DEFAULT_SENDER')
 LOGO_PATH = r'C:\path\to\renewal-email-service\logo.jpg'  # Path to the Ribbon Demographics logo
 
 
+def update_expired_subscriptions():
+    today = datetime.now(UTC).date()
+    conn = connect()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            UPDATE subscriptions_draft
+            SET status = 'Expired'
+            WHERE renewal_date < %s AND LOWER(status) = 'active';
+        """, (today,))
+        affected_rows = cursor.rowcount
+        conn.commit()
+        logger.info(f"Updated {affected_rows} subscriptions to 'Expired'.")
+    except Exception as e:
+        logger.error(f"Failed to update expired subscriptions: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def get_subscriptions_to_notify():
     today = datetime.now(UTC).date()
     renewal_offsets = [30, 60, 3]
@@ -131,6 +152,7 @@ def send_renewal_email(email, days_out, subscriptions, fname, lname):
 
 
 def main():
+    update_expired_subscriptions()
     notifications = get_subscriptions_to_notify()
     logging.info(notifications)
     for (email, days_out, fname, lname), subs in notifications.items():
